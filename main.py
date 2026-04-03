@@ -100,13 +100,58 @@ async def panel_callback(event):
         elif data == b"status":
             await event.answer(f"Status: {'Running' if BotState.is_auto_running else 'Stopped'}")
             await event.edit("🎛 **iDrama Bot Control Panel**", buttons=get_panel_buttons())
+        elif data.startswith(b"dl_"):
+            book_id = data.decode().split("_")[1]
+            await event.answer("Starting download...")
+            # Trigger download logic (similar to /download command but as a task)
+            asyncio.create_task(handle_one_download(event.chat_id, book_id))
     except Exception as e:
         if "message is not modified" in str(e).lower(): pass
         else: logger.error(f"Callback error: {e}")
 
+async def handle_one_download(chat_id, book_id):
+    """Helper to handle a single drama download flow."""
+    if BotState.is_processing:
+        await client.send_message(chat_id, "⚠️ Sedang memproses drama lain. Mohon tunggu.")
+        return
+        
+    BotState.is_processing = True
+    try:
+        status_msg = await client.send_message(chat_id, f"📥 Memulai download untuk ID: `{book_id}`...")
+        success = await process_drama_full(book_id, chat_id, status_msg)
+        if success:
+             processed_ids.add(book_id)
+             save_processed(processed_ids)
+    finally:
+        BotState.is_processing = False
+
 @client.on(events.NewMessage(pattern='/start'))
 async def start(event):
-    await event.reply("Welcome to iDrama Downloader Bot! 🎉\n\nGunakan perintah `/download {bookId}` untuk mulai.")
+    await event.reply("Welcome to iDrama Downloader Bot! 🎉\n\nGunakan perintah:\n🔍 `/cari {judul}` - Mencari drama\n📽 `/download {bookId}` - Download ID drama tertentu.")
+
+@client.on(events.NewMessage(pattern=r'/cari (.*)'))
+async def on_search(event):
+    query = event.pattern_match.group(1).strip()
+    if not query:
+        await event.reply("❌ Masukkan judul drama. Contoh: `/cari istri ceo`")
+        return
+        
+    status = await event.reply(f"🔍 Mencari drama: **{query}**...")
+    results = await search_dramas(query)
+    
+    if not results:
+        await status.edit(f"❌ Tidak ditemukan hasil untuk `{query}`.")
+        return
+        
+    buttons = []
+    # Limit to 10 results for clarity
+    for item in results[:10]:
+        title = item.get("bookName") or item.get("title") or "Unknown"
+        bid = item.get("bookId") or item.get("id")
+        if bid:
+            buttons.append([Button.inline(f"🎬 {title[:40]}", f"dl_{bid}")])
+            
+    await status.edit(f"✅ Ditemukan {len(buttons)} hasil untuk **{query}**:", buttons=buttons)
 
 @client.on(events.NewMessage(pattern=r'/download (\d+)'))
 async def on_download(event):
@@ -120,32 +165,7 @@ async def on_download(event):
         return
         
     book_id = event.pattern_match.group(1)
-    
-    data_full = await get_drama_detail(book_id)
-    if not data_full:
-        await event.reply(f"❌ Gagal mendapatkan detail drama `{book_id}`.")
-        return
-    
-    book_data = data_full.get("book", {})
-    episodes = await get_all_episodes(book_id)
-    
-    if not episodes:
-        # Try fallback from detail if list is in detail
-        episodes = data_full.get("list", [])
-        
-    if not episodes:
-        await event.reply(f"❌ Drama `{book_id}` tidak memiliki episode.")
-        return
-        
-    title = book_data.get("bookName") or f"Drama_{book_id}"
-    status_msg = await event.reply(f"🎬 Drama: **{title}**\n📽 Total Episodes: {len(episodes)}\n\n⏳ Memproses...")
-    
-    BotState.is_processing = True
-    processed_ids.add(book_id)
-    save_processed(processed_ids)
-    
-    await process_drama_full(book_id, chat_id, status_msg)
-    BotState.is_processing = False
+    await handle_one_download(chat_id, book_id)
 
 async def process_drama_full(book_id, chat_id, status_msg=None):
     """Refactored logic for iDrama API."""
