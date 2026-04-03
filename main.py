@@ -261,8 +261,8 @@ async def auto_mode_loop():
                 except: pass
                 
                 BotState.is_processing = True
-                # Send result directly to you (ADMIN_ID) alih-alih channel publik
-                success = await process_drama_full(bid, ADMIN_ID)
+                # Send result to the configured AUTO_CHANNEL
+                success = await process_drama_full(bid, AUTO_CHANNEL)
                 BotState.is_processing = False
                 
                 if success:
