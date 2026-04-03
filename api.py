@@ -3,10 +3,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://drakula.dramabos.my.id/api/microdrama"
+BASE_URL = "https://idrama.dramabos.my.id"
 AUTH_CODE = "A8D6AB170F7B89F2182561D3B32F390D"
 
 async def get_drama_detail(book_id: str):
+    """Fetch drama detail and episodes from the new iDrama API."""
     url = f"{BASE_URL}/drama/{book_id}"
     params = {
         "lang": "id",
@@ -16,126 +17,132 @@ async def get_drama_detail(book_id: str):
     async with httpx.AsyncClient(timeout=30) as client:
         try:
             response = await client.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            if data and isinstance(data, dict):
-                if data.get("success") and "data" in data:
-                    return data["data"]
-                return data
+            if response.status_code == 200:
+                data = response.json()
+                # Wrap the flat response in a 'book' key for compatibility with main.py
+                # Use 'short_play_name' and other fields accurately from the JSON
+                data["bookName"] = data.get("short_play_name")
+                data["cover"] = data.get("cover_url")
+                data["introduction"] = data.get("introduction")
+                
+                episodes = data.get("episode_list", [])
+                for ep in episodes:
+                    ep["bookId"] = book_id
+                
+                return {
+                    "book": data,
+                    "list": episodes
+                }
             return None
         except Exception as e:
             logger.error(f"Error fetching drama detail for {book_id}: {e}")
             return None
 
 async def get_all_episodes(book_id: str):
-    # For MicroDrama API, the episodes are returned inside the detail response
+    """Fetch episodes list. In iDrama API, this is included in the drama detail."""
     detail = await get_drama_detail(book_id)
-    if detail and "episodes" in detail:
-        return detail["episodes"]
+    if detail:
+        return detail.get("list", [])
     return []
 
-async def get_latest_dramas(pages=1, types=None):
-    """Tries to find new dramas from verified API endpoints."""
-    all_dramas = []
+async def get_hot_dramas():
+    """Fetch hot/popular dramas using the home/tab structure."""
+    home_url = f"{BASE_URL}/home"
+    lang_params = {"lang": "id"}
     
-    async with httpx.AsyncClient(timeout=30) as client:
-        for page in range(1, pages + 1):
-            url = f"{BASE_URL}/list"
-            params = {
-                "lang": "id",
-                "code": AUTH_CODE,
-                "page": page,
-                "limit": 20
-            }
-            if types and isinstance(types, list) and len(types) > 0:
-                params["type"] = types[0]
-                
-            try:
-                response = await client.get(url, params=params)
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get("success") and "data" in data:
-                        items_data = data["data"]
-                        items = items_data.get("data", [])
-                        if not items:
-                            break
-                        all_dramas.extend(items)
-                    else:
-                        break
-                else:
-                    break
-            except Exception as e:
-                logger.error(f"Error fetching list page {page}: {e}")
-                break
-    
-    return all_dramas
-
-# iDrama API (API 2) Configuration
-BASE_IDRAMA = "https://idrama.dramabos.my.id"
-
-async def get_latest_idramas(pages=1):
-    """Fetches latest dramas from iDrama API home sections."""
-    all_dramas = []
     async with httpx.AsyncClient(timeout=30) as client:
         try:
-            # 1. Fetch home to get some tab IDs
-            home_url = f"{BASE_IDRAMA}/home"
-            params = {"lang": "id"}
-            resp = await client.get(home_url, params=params)
-            if resp.status_code != 200:
-                return []
-            
-            home_data = resp.json()
-            # If the data has tabs, try the first few tabs
-            tabs = home_data.get("data", []) if isinstance(home_data, dict) else []
-            if not tabs:
-                return []
-                
-            # Iterate through tabs and get content
-            for tab in tabs[:2]: # Only first 2 tabs to avoid overloading
-                tab_id = tab.get("id")
-                if not tab_id: continue
-                
-                tab_url = f"{BASE_IDRAMA}/tab/{tab_id}"
-                tab_resp = await client.get(tab_url, params={"lang": "id"})
-                if tab_resp.status_code == 200:
-                    tab_data = tab_resp.json()
-                    # Each tab has sections, each section has data (dramas)
-                    sections = tab_data.get("data", []) if isinstance(tab_data, dict) else []
-                    for section in sections:
-                        items = section.get("data", [])
-                        if isinstance(items, list):
-                            all_dramas.extend(items)
+            home_resp = await client.get(home_url, params=lang_params)
+            if home_resp.status_code == 200:
+                home_data = home_resp.json()
+                tabs = home_data.get("list", []) # Root 'list' for tabs
+                if tabs:
+                    target_tab_id = None
+                    # Search for 'Seding Tren' or similar in rankings/tabs
+                    for tab in tabs:
+                        sub_navs = tab.get("sub_navs", [])
+                        for sub in sub_navs:
+                            if any(x in sub.get("title", "").lower() for x in ["tren", "hits", "hot", "populer"]):
+                                target_tab_id = sub.get("key")
+                                break
+                        if target_tab_id: break
+                    
+                    if not target_tab_id:
+                        for tab in tabs:
+                            if any(x in tab.get("title", "").lower() for x in ["terbaru", "beranda", "home"]):
+                                target_tab_id = tab.get("key")
+                                break
+                    
+                    if not target_tab_id: target_tab_id = tabs[0].get("key")
+                    
+                    tab_url = f"{BASE_URL}/tab/{target_tab_id}"
+                    tab_resp = await client.get(tab_url, params=lang_params)
+                    if tab_resp.status_code == 200:
+                        sections = tab_resp.json()
+                        all_items = []
+                        if isinstance(sections, list):
+                            for sec in sections:
+                                items = sec.get("short_plays", [])
+                                if items:
+                                    for item in items:
+                                        item["bookId"] = item.get("id")
+                                        item["bookName"] = item.get("short_play_name")
+                                        item["cover"] = item.get("cover_url")
+                                    all_items.extend(items)
+                        return all_items
+            return []
         except Exception as e:
-            logger.error(f"Error fetching iDrama latest: {e}")
-            
-    return all_dramas
+            logger.error(f"Error fetching hot dramas: {e}")
+            return []
 
-async def get_idrama_detail(book_id: str):
-    """Fetches drama detail from iDrama API."""
-    url = f"{BASE_IDRAMA}/drama/{book_id}"
+async def get_home_dramas(page=1, size=50):
+    return await get_hot_dramas()
+
+async def search_dramas(query: str, page=1, size=15):
+    url = f"{BASE_URL}/search"
+    params = {
+        "lang": "id",
+        "q": query,
+        "page": page
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            response = await client.get(url, params=params)
+            if response.status_code == 200:
+                # Search returns a list of results directly
+                items = response.json()
+                if isinstance(items, list):
+                    for item in items:
+                        item["bookId"] = item.get("id")
+                        item["bookName"] = item.get("short_play_name")
+                    return items
+            return []
+        except Exception as e:
+            logger.error(f"Error searching dramas for {query}: {e}")
+            return []
+
+async def get_play_url(book_id: str, ep: int):
+    """
+    Unlock/Get play URL for a specific episode.
+    """
+    url = f"{BASE_URL}/unlock/{book_id}/{ep}"
     params = {
         "lang": "id",
         "code": AUTH_CODE
     }
-    
+    headers = {
+        "Referer": "https://idrama.dramabos.my.id/",
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1"
+    }
     async with httpx.AsyncClient(timeout=30) as client:
         try:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            if data and isinstance(data, dict):
-                if data.get("success") and "data" in data:
-                    return data["data"]
-                return data
+            response = await client.get(url, params=params, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                # Data is in 'target_ep_info'
+                info = data.get("target_ep_info", {})
+                return info
             return None
         except Exception as e:
-            logger.error(f"Error fetching iDrama detail for {book_id}: {e}")
+            logger.error(f"Error unlocking episode {ep} for drama {book_id}: {e}")
             return None
-
-async def get_idrama_all_episodes(book_id: str):
-    """Fetches episodes from iDrama API detail."""
-    detail = await get_idrama_detail(book_id)
-    if detail and "episodes" in detail:
-        return detail["episodes"]
-    return []

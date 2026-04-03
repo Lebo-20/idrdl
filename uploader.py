@@ -6,15 +6,30 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+import time
+
+# Use a state dictionary to track the last update time for each upload
+last_update_tracker = {}
+
 async def upload_progress(current, total, event, msg_text="Uploading..."):
-    """Callback function for upload progress."""
+    """Callback function for upload progress with Flood Wait prevention."""
     percentage = (current / total) * 100
-    try:
-        # Avoid flood by updating every few percentages
-        if int(percentage) % 10 == 0:
-            await event.edit(f"{msg_text} {percentage:.1f}%")
-    except:
-        pass
+    current_time = time.time()
+    
+    # Create a unique key for this event (message)
+    event_key = id(event)
+    last_time = last_update_tracker.get(event_key, 0)
+    
+    # Only update if at least 15 seconds have passed OR it reached 100%
+    # This is much safer to avoid Telegram Flood Wait during long uploads.
+    if (current_time - last_time > 15) or current == total:
+        try:
+            # We also check for % 10 to keep the progress clean
+            if int(percentage) % 10 == 0 or current == total:
+                await event.edit(f"{msg_text} {percentage:.1f}%")
+                last_update_tracker[event_key] = current_time
+        except:
+            pass
 
 async def upload_drama(client: TelegramClient, chat_id: int, 
                        title: str, description: str, 

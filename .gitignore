@@ -1,0 +1,17 @@
+.env
+*.session
+*.session-journal
+home_raw.json
+processed.json
+test_output.txt
+quick_test.py
+test_idrama_api.py
+__pycache__/
+*.mp4
+episodes/
+results.txt
+test_*.py
+node_modules/
+proxy/node_modules/
+.gemini/
+*.log
