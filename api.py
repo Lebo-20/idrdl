@@ -46,7 +46,7 @@ async def get_all_episodes(book_id: str):
     return []
 
 async def get_hot_dramas():
-    """Fetch hot/popular dramas using the home/tab structure."""
+    """Fetch hot/popular dramas by scanning all relevant category tabs."""
     home_url = f"{BASE_URL}/home"
     lang_params = {"lang": "id"}
     
@@ -55,41 +55,50 @@ async def get_hot_dramas():
             home_resp = await client.get(home_url, params=lang_params)
             if home_resp.status_code == 200:
                 home_data = home_resp.json()
-                tabs = home_data.get("list", []) # Root 'list' for tabs
-                if tabs:
-                    target_tab_id = None
-                    # Search for 'Seding Tren' or similar in rankings/tabs
-                    for tab in tabs:
-                        sub_navs = tab.get("sub_navs", [])
-                        for sub in sub_navs:
-                            if any(x in sub.get("title", "").lower() for x in ["tren", "hits", "hot", "populer"]):
-                                target_tab_id = sub.get("key")
-                                break
-                        if target_tab_id: break
+                tabs = home_data.get("list", [])
+                
+                target_keys = []
+                keywords = ["tren", "hits", "hot", "populer", "terbaru", "beranda", "home"]
+                
+                # Identify all relevant tabs
+                for tab in tabs:
+                    # Check main tab title
+                    if any(k in tab.get("title", "").lower() for k in keywords):
+                        target_keys.append(tab.get("key"))
                     
-                    if not target_tab_id:
-                        for tab in tabs:
-                            if any(x in tab.get("title", "").lower() for x in ["terbaru", "beranda", "home"]):
-                                target_tab_id = tab.get("key")
-                                break
-                    
-                    if not target_tab_id: target_tab_id = tabs[0].get("key")
-                    
-                    tab_url = f"{BASE_URL}/tab/{target_tab_id}"
+                    # Check sub-navigation items
+                    sub_navs = tab.get("sub_navs", [])
+                    for sub in sub_navs:
+                        if any(k in sub.get("title", "").lower() for k in keywords):
+                            target_keys.append(sub.get("key"))
+                
+                # Remove duplicate keys and None
+                target_keys = list(set(k for k in target_keys if k))
+                
+                if not target_keys and tabs:
+                    target_keys = [tabs[0].get("key")]
+
+                all_items = []
+                seen_ids = set()
+
+                # Scan each identified tab
+                for key in target_keys:
+                    tab_url = f"{BASE_URL}/tab/{key}"
                     tab_resp = await client.get(tab_url, params=lang_params)
                     if tab_resp.status_code == 200:
                         sections = tab_resp.json()
-                        all_items = []
                         if isinstance(sections, list):
                             for sec in sections:
                                 items = sec.get("short_plays", [])
-                                if items:
-                                    for item in items:
-                                        item["bookId"] = item.get("id")
+                                for item in items:
+                                    bid = str(item.get("id"))
+                                    if bid not in seen_ids:
+                                        item["bookId"] = bid
                                         item["bookName"] = item.get("short_play_name")
                                         item["cover"] = item.get("cover_url")
-                                    all_items.extend(items)
-                        return all_items
+                                        all_items.append(item)
+                                        seen_ids.add(bid)
+                return all_items
             return []
         except Exception as e:
             logger.error(f"Error fetching hot dramas: {e}")
