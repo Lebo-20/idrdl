@@ -66,14 +66,34 @@ async def update_bot(event):
         return
     import subprocess
     import sys
+    import os
     
     status_msg = await event.reply("🔄 Menarik pembaruan dari GitHub...")
     try:
+        # Run git pull
         result = subprocess.run(["git", "pull", "origin", "main"], capture_output=True, text=True)
+        if "Already up to date" in result.stdout and "--force" not in event.text:
+             await status_msg.edit(f"✅ Sudah yang terbaru:\n```\n{result.stdout}\n```")
+             return
+
         await status_msg.edit(f"✅ Repositori berhasil di-pull:\n```\n{result.stdout}\n```\n\nSedang memulai ulang sistem...")
-        os.execl(sys.executable, sys.executable, *sys.argv)
+        
+        # Disconnect client properly before restart
+        await client.disconnect()
+
+        # Robust restart for Windows/Linux
+        if os.name == 'nt':
+            # On Windows, spawning a new process and exiting the old one is often more reliable
+            subprocess.Popen([sys.executable] + sys.argv)
+            sys.exit()
+        else:
+            # Unix-like
+            os.execl(sys.executable, sys.executable, *sys.argv)
+            
     except Exception as e:
-        await status_msg.edit(f"❌ Gagal melakukan update: {e}")
+        logger.error(f"Update error: {e}")
+        try: await status_msg.edit(f"❌ Gagal melakukan update: {e}")
+        except: pass
 
 @client.on(events.NewMessage(pattern='/panel'))
 async def panel(event):
