@@ -58,8 +58,9 @@ async def download_m3u8(url: str, output_path: str, subtitle_url: str = None, re
                         
                         # Add subtitle filter - use libx264 for encoding as hardsubbing requires re-encoding
                         # Use -preset ultrafast for speed as requested
+                        sub_path_fixed = temp_sub.replace('\\', '/')
                         command += [
-                            "-vf", f"subtitles={temp_sub.replace('\\', '/')}:force_style='{style}'",
+                            "-vf", f"subtitles={sub_path_fixed}:force_style='{style}'",
                             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                             "-c:a", "aac"
                         ]
