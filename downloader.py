@@ -15,13 +15,25 @@ async def download_m3u8(url: str, output_path: str, retries: int = 3):
     )
     user_agent = "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1"
 
+    # Strip iDrama proxy if present, we'll use our own headers
+    if url.startswith("https://idrama.dramabos.my.id/proxy?url="):
+        from urllib.parse import unquote, urlparse, parse_qs
+        parsed = urlparse(url)
+        url = parse_qs(parsed.query).get('url', [url])[0]
+        url = unquote(url)
+
     for attempt in range(1, retries + 1):
         try:
             command = [
                 "ffmpeg", "-y",
                 "-headers", headers_str,
                 "-user_agent", user_agent,
+                "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
                 "-allowed_extensions", "ALL",
+                "-reconnect", "1",
+                "-reconnect_at_eof", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "5",
                 "-i", url,
                 "-c", "copy",
                 "-bsf:a", "aac_adtstoasc",
