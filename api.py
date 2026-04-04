@@ -58,18 +58,20 @@ async def get_hot_dramas():
                 tabs = home_data.get("list", [])
                 
                 target_keys = []
-                keywords = ["tren", "hits", "hot", "populer", "terbaru", "beranda", "home"]
+                keywords = ["tren", "hits", "hot", "populer", "terbaru", "peringkat", "daftar", "pilihan", "rekomendasi", "beranda", "home"]
                 
                 # Identify all relevant tabs
                 for tab in tabs:
+                    title = tab.get("title", "").lower()
                     # Check main tab title
-                    if any(k in tab.get("title", "").lower() for k in keywords):
+                    if any(k in title for k in keywords):
                         target_keys.append(tab.get("key"))
                     
                     # Check sub-navigation items
                     sub_navs = tab.get("sub_navs", [])
                     for sub in sub_navs:
-                        if any(k in sub.get("title", "").lower() for k in keywords):
+                        sub_title = sub.get("title", "").lower()
+                        if any(k in sub_title for k in keywords):
                             target_keys.append(sub.get("key"))
                 
                 # Remove duplicate keys and None
@@ -118,11 +120,12 @@ async def search_dramas(query: str, page=1, size=15):
         try:
             response = await client.get(url, params=params)
             if response.status_code == 200:
-                # Search returns a list of results directly
-                items = response.json()
+                data = response.json()
+                # Search returns a dict with 'results' key
+                items = data.get("results", []) if isinstance(data, dict) else data
                 if isinstance(items, list):
                     for item in items:
-                        item["bookId"] = item.get("id")
+                        item["bookId"] = str(item.get("id"))
                         item["bookName"] = item.get("short_play_name")
                     return items
             return []
