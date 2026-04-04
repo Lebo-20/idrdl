@@ -58,7 +58,8 @@ async def download_m3u8(url: str, output_path: str, subtitle_url: str = None, re
                         
                         # Add subtitle filter - use libx264 for encoding as hardsubbing requires re-encoding
                         # Use -preset ultrafast for speed as requested
-                        sub_path_fixed = temp_sub.replace('\\', '/')
+                        # Important: Escape characters for FFmpeg filter graph parsing!
+                        sub_path_fixed = temp_sub.replace('\\', '/').replace(':', '\\:').replace(' ', '\\ ').replace(',', '\\,').replace('=', '\\=')
                         command += [
                             "-vf", f"subtitles={sub_path_fixed}:force_style='{style}'",
                             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
@@ -89,7 +90,14 @@ async def download_m3u8(url: str, output_path: str, subtitle_url: str = None, re
                 return True
             
             error_msg = stderr.decode().strip()
-            logger.warning(f"Attempt {attempt} failed for {output_path}: {error_msg}")
+            # Log the tail of the error for brevity
+            logger.warning(f"Attempt {attempt} failed for {output_path}: {error_msg[-200:]}")
+            
+            # If FFmpeg failed, and we have one final retry, try without subtitles to salvage the video
+            if attempt == retries - 1 and subtitle_url:
+                logger.warning(f"Fallback triggered: Retrying {output_path} without subtitles.")
+                subtitle_url = None
+
         except Exception as e:
             logger.error(f"Error on attempt {attempt} downloading {output_path}: {e}")
         finally:
