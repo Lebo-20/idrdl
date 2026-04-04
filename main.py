@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 class BotState:
     is_auto_running = True
     is_processing = False
-    download_queue = asyncio.Queue()
+    download_queue = asyncio.PriorityQueue()
     queued_ids = set() # To track items currently in the queue
     current_task_info = "Idle"
 
@@ -155,17 +155,17 @@ async def download_worker():
     logger.info("👷 Download worker started.")
     while True:
         try:
-            # item is a dict: {'chat_id': ..., 'book_id': ..., 'title': ..., 'status_msg': ...}
-            item = await BotState.download_queue.get()
+            # item is a tuple: (priority, data_dict)
+            priority, item = await BotState.download_queue.get()
             chat_id = item['chat_id']
             book_id = item['book_id']
             title = item.get('title', f'ID {book_id}')
             status_msg = item.get('status_msg')
             
             BotState.is_processing = True
-            BotState.current_task_info = f"Processing {title}"
+            BotState.current_task_info = f"Processing {title} (P{priority})"
             
-            logger.info(f"⚡ [Queue] Processing task: {title} ({book_id})")
+            logger.info(f"⚡ [Queue] Processing task: {title} ({book_id}) - Priority {priority}")
             
             # If no status_msg was provided (auto-mode), create a start message
             if not status_msg:
@@ -235,15 +235,15 @@ async def handle_one_download(chat_id, book_id, title=None):
     queue_size = BotState.download_queue.qsize()
     status_text = "Sedang diproses..." if BotState.is_processing and queue_size == 0 else f"Masuk antrean ke-{queue_size + 1}"
     
-    msg = await client.send_message(chat_id, f"📥 **Pesan Diterima**\n🆔 `{book_id}`\n📊 Status: {status_text}")
+    msg = await client.send_message(chat_id, f"📥 **Pesan Diterima**\n🆔 `{book_id}`\n📊 Status: {status_text} (Prioritas Manual)")
     
-    # Put in queue
-    await BotState.download_queue.put({
+    # Put in queue with Priority 1 (Manual)
+    await BotState.download_queue.put((1, {
         'chat_id': chat_id,
         'book_id': book_id,
         'title': title or f"ID {book_id}",
         'status_msg': msg
-    })
+    }))
 
 @client.on(events.NewMessage(pattern='/start'))
 async def start(event):
@@ -280,9 +280,7 @@ async def on_download(event):
         await event.reply("❌ Maaf, perintah ini hanya untuk admin.")
         return
         
-    if BotState.is_processing:
-        await event.reply("⚠️ Sedang memproses drama lain.")
-        return
+    # Manual download (Queue enabled, Priority 1)
         
     book_id = event.pattern_match.group(1).strip()
     logger.info(f"Manual download triggered for ID: {book_id}")
@@ -398,12 +396,13 @@ async def auto_mode_loop():
                 # Push to queue instead of processing directly
                 BotState.queued_ids.add(bid) # Prevent scanning it back while in queue
                 
-                await BotState.download_queue.put({
+                # Priority 2 for Auto-Scan
+                await BotState.download_queue.put((2, {
                     'chat_id': AUTO_CHANNEL,
                     'book_id': bid,
                     'title': title,
                     'status_msg': None
-                })
+                }))
                 
                 await asyncio.sleep(2)
             
