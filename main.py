@@ -154,9 +154,12 @@ async def download_worker():
     global processed_ids
     logger.info("👷 Download worker started.")
     while True:
+        item = {} # Initialize to prevent errors in finally block
         try:
             # item is a tuple: (priority, data_dict)
-            priority, item = await BotState.download_queue.get()
+            priority, item_tuple = await BotState.download_queue.get()
+            priority, item = item_tuple if isinstance(item_tuple, tuple) else (priority, item_tuple)
+            
             chat_id = item['chat_id']
             book_id = item['book_id']
             title = item.get('title', f'ID {book_id}')
@@ -179,10 +182,10 @@ async def download_worker():
 
             logger.info(f"🚀 Calling process_drama_full for: {title}")
             try:
-                # Add a wrapper timeout for the entire process to prevent hanging
-                success = await asyncio.wait_for(process_drama_full(book_id, chat_id, status_msg), timeout=3600)
+                # Set a very long timeout (10 hours) as requested
+                success = await asyncio.wait_for(process_drama_full(book_id, chat_id, status_msg), timeout=36000)
             except asyncio.TimeoutError:
-                logger.error(f"⌛ Task {title} timed out after 1 hour.")
+                logger.error(f"⌛ Task {title} timed out after 10 hours.")
                 success = False
             except Exception as e:
                 logger.error(f"Error in process_drama: {e}")
@@ -347,7 +350,9 @@ async def process_drama_full(book_id, chat_id, status_msg=None):
             
     except Exception as e:
         logger.error(f"Error processing {book_id}: {e}")
-        if status_msg: await status_msg.edit(f"❌ Error: {e}")
+        try:
+            if status_msg: await status_msg.edit(f"❌ Error: {e}")
+        except: pass
         return False
     finally:
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
