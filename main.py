@@ -89,12 +89,16 @@ async def update_bot(event):
 
         # Robust restart for Windows/Linux
         if os.name == 'nt':
-            # On Windows, spawning a new process and exiting the old one is often more reliable
-            subprocess.Popen([sys.executable] + sys.argv)
+            # On Windows, using DETACHED_PROCESS ensures the new bot survives when the old one exits
+            import subprocess
+            DETACHED_PROCESS = 0x00000008
+            # Re-run the bot using the full executable path and current script
+            script_path = os.path.abspath(sys.argv[0])
+            subprocess.Popen([sys.executable, script_path], creationflags=DETACHED_PROCESS, shell=True)
             sys.exit()
         else:
-            # Unix-like
-            os.execl(sys.executable, sys.executable, *sys.argv)
+            # Unix-like uses execv to replace the current process
+            os.execv(sys.executable, [sys.executable] + sys.argv)
             
     except Exception as e:
         logger.error(f"Update error: {e}")
