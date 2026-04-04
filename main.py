@@ -49,20 +49,26 @@ logger = logging.getLogger(__name__)
 class BotState:
     is_auto_running = True
     is_processing = False
+    download_queue = asyncio.Queue()
+    queued_ids = set() # To track items currently in the queue
+    current_task_info = "Idle"
 
 # Initialize client
 client = TelegramClient('dramabox_bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
 def get_panel_buttons():
     status_text = "🟢 RUNNING" if BotState.is_auto_running else "🔴 STOPPED"
+    queue_size = BotState.download_queue.qsize()
     return [
         [Button.inline("▶️ Start Auto", b"start_auto"), Button.inline("⏹ Stop Auto", b"stop_auto")],
-        [Button.inline(f"📊 Status: {status_text}", b"status")]
+        [Button.inline(f"📊 Status: {status_text}", b"status")],
+        [Button.inline(f"⏳ Antrean: {queue_size} drama", b"status")]
     ]
 
-@client.on(events.NewMessage(pattern='/update'))
+@client.on(events.NewMessage(pattern=r'/update'))
 async def update_bot(event):
     if event.sender_id != ADMIN_ID:
+        await event.reply("❌ Perintah ini hanya untuk Admin utama.")
         return
     import subprocess
     import sys
@@ -129,21 +135,91 @@ async def panel_callback(event):
         if "message is not modified" in str(e).lower(): pass
         else: logger.error(f"Callback error: {e}")
 
-async def handle_one_download(chat_id, book_id):
-    """Helper to handle a single drama download flow."""
-    if BotState.is_processing:
-        await client.send_message(chat_id, "⚠️ Sedang memproses drama lain. Mohon tunggu.")
+async def download_worker():
+    """Background worker that processes the download queue one by one."""
+    global processed_ids
+    logger.info("👷 Download worker started.")
+    while True:
+        try:
+            # item is a dict: {'chat_id': ..., 'book_id': ..., 'title': ..., 'status_msg': ...}
+            item = await BotState.download_queue.get()
+            chat_id = item['chat_id']
+            book_id = item['book_id']
+            title = item.get('title', f'ID {book_id}')
+            status_msg = item.get('status_msg')
+            
+            BotState.is_processing = True
+            BotState.current_task_info = f"Processing {title}"
+            
+            logger.info(f"⚡ [Queue] Processing task: {title} ({book_id})")
+            
+            # If no status_msg was provided (auto-mode), create a start message
+            if not status_msg:
+                try:
+                    status_msg = await client.send_message(
+                        chat_id, 
+                        f"🎬 **Mulai Memproses (Antrean)**\n🎬 `{title}`\n🆔 `{book_id}`\n⏳ Mohon tunggu..."
+                    )
+                except: pass
+
+            success = await process_drama_full(book_id, chat_id, status_msg)
+            
+            if success:
+                processed_ids.add(book_id)
+                save_processed(processed_ids)
+                logger.info(f"✅ Success processing {title}")
+                try: await client.send_message(chat_id, f"✅ **Selesai:** {title}")
+                except: pass
+            else:
+                logger.error(f"❌ Failed processing {title}")
+                # We don't add to processed_ids if it failed, so it can be re-scanned/re-queued
+                try: await client.send_message(chat_id, f"❌ **Gagal:** {title}")
+                except: pass
+                
+            # Delete status message if it survived
+            if status_msg:
+                try: await status_msg.delete()
+                except: pass
+
+        except Exception as e:
+            logger.error(f"Worker Error: {e}")
+        finally:
+            # Remove from queued tracking regardless of success/fail
+            if 'book_id' in item:
+                BotState.queued_ids.discard(item['book_id'])
+            
+            BotState.is_processing = False
+            BotState.current_task_info = "Idle"
+            BotState.download_queue.task_done()
+            await asyncio.sleep(2) # Brief rest between tasks
+
+async def handle_one_download(chat_id, book_id, title=None):
+    """Adds a drama to the download queue."""
+    # Check if already processed
+    if book_id in processed_ids:
+        await client.send_message(chat_id, f"✅ Drama `{book_id}` sudah pernah diproses sebelumnya.")
         return
-        
-    BotState.is_processing = True
-    try:
-        status_msg = await client.send_message(chat_id, f"📥 Memulai download untuk ID: `{book_id}`...")
-        success = await process_drama_full(book_id, chat_id, status_msg)
-        if success:
-             processed_ids.add(book_id)
-             save_processed(processed_ids)
-    finally:
-        BotState.is_processing = False
+
+    # Check if currently in queue
+    if book_id in BotState.queued_ids:
+        await client.send_message(chat_id, f"🕒 Drama `{book_id}` sedang dalam antrean. Mohon bersabar.")
+        return
+    
+    # Mark as queued
+    BotState.queued_ids.add(book_id)
+    
+    queue_size = BotState.download_queue.qsize()
+    status_text = "Sedang diproses..." if BotState.is_processing and queue_size == 0 else f"Masuk antrean ke-{queue_size + 1}"
+    
+    msg = await client.send_message(chat_id, f"📥 **Pesan Diterima**\n🆔 `{book_id}`\n📊 Status: {status_text}")
+    
+    # Put in queue
+    await BotState.download_queue.put({
+        'chat_id': chat_id,
+        'book_id': book_id,
+        'title': title or f"ID {book_id}",
+        'status_msg': msg
+    })
 
 @client.on(events.NewMessage(pattern='/start'))
 async def start(event):
@@ -242,7 +318,6 @@ async def process_drama_full(book_id, chat_id, status_msg=None):
         )
         
         if upload_success:
-            if status_msg: await status_msg.delete()
             return True
         else:
             if status_msg: await status_msg.edit("❌ Upload Gagal.")
@@ -294,29 +369,19 @@ async def auto_mode_loop():
                 bid = str(drama.get("bookId") or drama.get("id") or drama.get("action", ""))
                 title = drama.get("bookName") or drama.get("tags") or drama.get("title") or "Unknown"
                 
-                processed_ids.add(bid)
-                save_processed(processed_ids)
+                logger.info(f"✨ New discovery added to queue: {title} ({bid})")
                 
-                logger.info(f"✨ New discovery: {title} ({bid})")
-                try:
-                    await client.send_message(ADMIN_ID, f"🆕 **Auto-System iDrama**\n🎬 `{title}`\n🆔 `{bid}`\n⏳ Memproses...")
-                except: pass
+                # Push to queue instead of processing directly
+                BotState.queued_ids.add(bid) # Prevent scanning it back while in queue
                 
-                BotState.is_processing = True
-                # Send result to the configured AUTO_CHANNEL
-                success = await process_drama_full(bid, AUTO_CHANNEL)
-                BotState.is_processing = False
+                await BotState.download_queue.put({
+                    'chat_id': AUTO_CHANNEL,
+                    'book_id': bid,
+                    'title': title,
+                    'status_msg': None
+                })
                 
-                if success:
-                    logger.info(f"✅ Success {title}")
-                    try: await client.send_message(ADMIN_ID, f"✅ Sukses: **{title}**")
-                    except: pass
-                else:
-                    logger.error(f"❌ Failed {title}")
-                    try: await client.send_message(ADMIN_ID, f"❌ Gagal: **{title}**")
-                    except: pass
-                
-                await asyncio.sleep(10)
+                await asyncio.sleep(2)
             
             is_initial_run = False
             await asyncio.sleep(interval * 60)
@@ -328,4 +393,5 @@ async def auto_mode_loop():
 if __name__ == '__main__':
     logger.info("iDrama Bot Active.")
     client.loop.create_task(auto_mode_loop())
+    client.loop.create_task(download_worker())
     client.run_until_disconnected()
