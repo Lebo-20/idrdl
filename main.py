@@ -138,6 +138,16 @@ async def panel_callback(event):
     except Exception as e:
         if "message is not modified" in str(e).lower(): pass
         else: logger.error(f"Callback error: {e}")
+@client.on(events.NewMessage(pattern='/checkq'))
+async def check_queue(event):
+    if event.sender_id != ADMIN_ID: return
+    queue_size = BotState.download_queue.qsize()
+    status = f"👷 **Worker Status:** {'PROCESSING' if BotState.is_processing else 'IDLE'}\n"
+    status += f"📝 **Current Task:** `{BotState.current_task_info}`\n"
+    status += f"⏳ **Queue Size:** {queue_size} drama\n"
+    if BotState.queued_ids:
+        status += f"🆔 **Queued IDs:** `{list(BotState.queued_ids)[:5]}...`"
+    await event.reply(status)
 
 async def download_worker():
     """Background worker that processes the download queue one by one."""
@@ -164,9 +174,19 @@ async def download_worker():
                         chat_id, 
                         f"🎬 **Mulai Memproses (Antrean)**\n🎬 `{title}`\n🆔 `{book_id}`\n⏳ Mohon tunggu..."
                     )
-                except: pass
+                except Exception as e:
+                    logger.warning(f"Failed to send start message for auto mode: {e}")
 
-            success = await process_drama_full(book_id, chat_id, status_msg)
+            logger.info(f"🚀 Calling process_drama_full for: {title}")
+            try:
+                # Add a wrapper timeout for the entire process to prevent hanging
+                success = await asyncio.wait_for(process_drama_full(book_id, chat_id, status_msg), timeout=3600)
+            except asyncio.TimeoutError:
+                logger.error(f"⌛ Task {title} timed out after 1 hour.")
+                success = False
+            except Exception as e:
+                logger.error(f"Error in process_drama: {e}")
+                success = False
             
             if success:
                 processed_ids.add(book_id)
