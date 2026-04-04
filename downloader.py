@@ -27,7 +27,7 @@ async def download_m3u8(url: str, output_path: str, subtitle_url: str = None, re
     # Style configuration from user:
     # Font: Standard Symbols PS, Color: White, Size: 10, Bold, Outline: 1 (Black), Offset: 90
     style = (
-        "Fontname=Standard Symbols PS,Fontsize=10,PrimaryColour=&HFFFFFF,"
+        "Fontname=Arial,Fontsize=10,PrimaryColour=&HFFFFFF,"
         "Bold=1,Outline=1,OutlineColour=&H000000,MarginV=90"
     )
 

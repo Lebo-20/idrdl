@@ -33,7 +33,9 @@ async def get_drama_detail(book_id: str):
                     "book": data,
                     "list": episodes
                 }
-            return None
+            else:
+                logger.warning(f"Drama detail {book_id} returned status {response.status_code}")
+                return None
         except Exception as e:
             logger.error(f"Error fetching drama detail for {book_id}: {e}")
             return None

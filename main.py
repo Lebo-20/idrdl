@@ -173,7 +173,7 @@ async def on_search(event):
             
     await status.edit(f"✅ Ditemukan {len(buttons)} hasil untuk **{query}**:", buttons=buttons)
 
-@client.on(events.NewMessage(pattern=r'/download (\d+)'))
+@client.on(events.NewMessage(pattern=r'/download\s+(\w+)'))
 async def on_download(event):
     chat_id = event.chat_id
     if chat_id != ADMIN_ID:
@@ -184,7 +184,8 @@ async def on_download(event):
         await event.reply("⚠️ Sedang memproses drama lain.")
         return
         
-    book_id = event.pattern_match.group(1)
+    book_id = event.pattern_match.group(1).strip()
+    logger.info(f"Manual download triggered for ID: {book_id}")
     await handle_one_download(chat_id, book_id)
 
 async def process_drama_full(book_id, chat_id, status_msg=None):
@@ -236,7 +237,8 @@ async def process_drama_full(book_id, chat_id, status_msg=None):
         upload_success = await upload_drama(
             client, chat_id, 
             title, description, 
-            poster, output_video_path
+            poster, output_video_path,
+            book_id=book_id
         )
         
         if upload_success:

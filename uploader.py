@@ -33,7 +33,8 @@ async def upload_progress(current, total, event, msg_text="Uploading..."):
 
 async def upload_drama(client: TelegramClient, chat_id: int, 
                        title: str, description: str, 
-                       poster_url: str, video_path: str):
+                       poster_url: str, video_path: str,
+                       book_id: str = "Unknown"):
     """
     Uploads the drama information and merged video to Telegram.
     """
@@ -41,7 +42,7 @@ async def upload_drama(client: TelegramClient, chat_id: int,
     import tempfile
     try:
         # 1. Send Poster + Description as PHOTO (not file)
-        caption = f"🎬 **{title}**\n\n📝 **Sinopsis:**\n{description[:500]}..."
+        caption = f"🎬 **{title}**\n🆔 ID: `{book_id}`\n\n📝 **Sinopsis:**\n{description[:500]}..."
         
         # Download poster to temp file first so Telethon sends it as photo
         import httpx
@@ -110,7 +111,7 @@ async def upload_drama(client: TelegramClient, chat_id: int,
         await client.send_file(
             chat_id,
             video_path,
-            caption=f"🎥 Full Episode: {title}",
+            caption=f"🎥 Full Episode: {title}\n🆔 ID: `{book_id}`",
             force_document=False, # FORCE IT AS VIDEO STREAM
             thumb=thumb_path,
             attributes=video_attributes,
