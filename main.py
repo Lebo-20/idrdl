@@ -5,8 +5,8 @@ import shutil
 import tempfile
 import re
 import json
-import argparse
 import sqlite3
+import multiprocessing
 from telethon import TelegramClient, events, Button
 from dotenv import load_dotenv
 
@@ -32,7 +32,7 @@ from uploader import upload_drama
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s')
 logger = logging.getLogger("MAIN")
 
-# --- DATABASE LAYER (Integrated inside main.py) ---
+# --- DATABASE LAYER ---
 class Database:
     def __init__(self, db_path=DB_PATH):
         self.db_path = db_path
@@ -102,12 +102,10 @@ class Database:
 
 db = Database()
 
-# --- ENGINE LOGIC (AUTO MODE) ---
+# --- ENGINE LOGIC (Process 1) ---
 async def process_drama_full(client, book_id, chat_id, status_msg=None):
     data_full = await get_drama_detail(book_id)
-    if not data_full:
-        if status_msg: await status_msg.edit(f"❌ Detail drama `{book_id}` tidak ditemukan.")
-        return False
+    if not data_full: return False
     
     book_data = data_full.get("book", {})
     episodes = await get_all_episodes(book_id) or data_full.get("list", [])
@@ -122,10 +120,8 @@ async def process_drama_full(client, book_id, chat_id, status_msg=None):
     try:
         if status_msg: await status_msg.edit(f"🎬 Processing **{title}**...")
         if not await download_all_episodes(episodes, video_dir): return False
-        
         output_video_path = os.path.join(temp_dir, f"{title}.mp4")
         if not merge_episodes(video_dir, output_video_path): return False
-        
         return await upload_drama(client, chat_id, title, book_data.get("introduction", ""), book_data.get("cover", ""), output_video_path, book_id=book_id)
     finally:
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
@@ -138,11 +134,9 @@ async def download_worker(client):
         if not task:
             await asyncio.sleep(5)
             continue
-        
         tid, bid, title, cid, prio = task
         db.update_task_status(tid, 1)
         status_msg = await client.send_message(cid, f"🎬 **Mulai Memproses**\n🎬 `{title}`\n🆔 `{bid}`")
-        
         try:
             if await asyncio.wait_for(process_drama_full(client, bid, cid, status_msg), timeout=36000):
                 db.add_processed(bid)
@@ -160,7 +154,6 @@ async def download_worker(client):
 
 async def auto_mode_loop():
     logger.info("🔍 Auto-detector started.")
-    initial = True
     while True:
         try:
             hot = await get_hot_dramas() or []
@@ -170,71 +163,89 @@ async def auto_mode_loop():
                 if bid and not db.is_processed(bid):
                     title = d.get("bookName") or d.get("title") or f"ID {bid}"
                     if db.add_task(bid, title, AUTO_CHANNEL, priority=2):
-                        logger.info(f"✨ New: {title}")
-            initial = False
+                        logger.info(f"✨ New discovery added to queue: {title}")
             await asyncio.sleep(30 * 60)
         except Exception as e:
             logger.error(f"Loop Error: {e}")
             await asyncio.sleep(60)
 
-# --- ADMIN LOGIC (ADMIN MODE) ---
-def setup_admin_handlers(client):
-    @client.on(events.NewMessage(pattern='/start'))
-    async def h_start(event):
-        await event.reply("🔍 `/cari {judul}`\n📽 `/download {id}`\n📊 `/status`")
+def run_auto_process():
+    """Target function for auto/worker process."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    async def _main():
+        client = TelegramClient('session_auto', API_ID, API_HASH)
+        await client.start(bot_token=BOT_TOKEN)
+        logger.info("✅ ENGINE (Auto & Worker) is online.")
+        await asyncio.gather(download_worker(client), auto_mode_loop())
+    
+    loop.run_until_complete(_main())
 
-    @client.on(events.NewMessage(pattern=r'/cari (.*)'))
-    async def h_search(event):
-        query = event.pattern_match.group(1).strip()
-        res = await search_dramas(query)
-        if not res: return await event.reply("❌ Kosong.")
-        btns = [[Button.inline(f"🎬 {r.get('bookName')[:40]}", f"dl_{r.get('bookId')}")] for r in res[:10]]
-        await event.reply(f"✅ Hasil search `{query}`:", buttons=btns)
+# --- ADMIN LOGIC (Process 2) ---
+def run_admin_process():
+    """Target function for admin commands process."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    async def _main():
+        client = TelegramClient('session_admin', API_ID, API_HASH)
+        await client.start(bot_token=BOT_TOKEN)
+        logger.info("✅ ADMIN (Commands) is online.")
 
-    @client.on(events.NewMessage(pattern=r'/download\s+(\w+)'))
-    async def h_dl(event):
-        if event.sender_id != ADMIN_ID: return
-        bid = event.pattern_match.group(1).strip()
-        if db.is_processed(bid): return await event.reply("✅ Sudah.")
-        if db.add_task(bid, f"Manual ID {bid}", event.chat_id, priority=1):
-            await event.reply(f"📥 Masuk antrean manual.")
-        else: await event.reply("🕒 Sudah di antrean.")
+        @client.on(events.NewMessage(pattern='/start'))
+        async def h_start(event):
+            await event.reply("🔍 `/cari {judul}`\n📽 `/download {id}`\n📊 `/status`")
 
-    @client.on(events.NewMessage(pattern='/status'))
-    async def h_status(event):
-        s = db.get_stats()
-        await event.reply(f"⏳ Pending: {s['pending']}\n👷 Active: {s['active']}")
+        @client.on(events.NewMessage(pattern=r'/cari (.*)'))
+        async def h_search(event):
+            query = event.pattern_match.group(1).strip()
+            res = await search_dramas(query)
+            if not res: return await event.reply("❌ Tidak ditemukan.")
+            btns = [[Button.inline(f"🎬 {r.get('bookName')[:40]}", f"dl_{r.get('bookId')}")] for r in res[:10]]
+            await event.reply(f"✅ Hasil search `{query}`:", buttons=btns)
 
-    @client.on(events.CallbackQuery())
-    async def h_cb(event):
-        if event.data.startswith(b"dl_"):
-            bid = event.data.decode().split("_")[1]
-            if db.add_task(bid, f"ID {bid}", event.chat_id, priority=1):
-                await event.answer("📥 Ditambahkan!")
-            else: await event.answer("⚠️ Sudah ada.")
+        @client.on(events.NewMessage(pattern=r'/download\s+(\w+)'))
+        async def h_dl(event):
+            if event.sender_id != ADMIN_ID: return
+            bid = event.pattern_match.group(1).strip()
+            if db.is_processed(bid): return await event.reply("✅ Drama sudah pernah diproses.")
+            if db.add_task(bid, f"Manual ID {bid}", event.chat_id, priority=1):
+                await event.reply(f"📥 Masuk antrean manual (Prio High).")
+            else: await event.reply("🕒 Sudah ada dalam antrean.")
 
-# --- BOOTSTRAP ---
-async def run_auto():
-    client = TelegramClient('session_auto', API_ID, API_HASH)
-    await client.start(bot_token=BOT_TOKEN)
-    logger.info("BOT MODE: AUTO started.")
-    await asyncio.gather(download_worker(client), auto_mode_loop())
+        @client.on(events.NewMessage(pattern='/status'))
+        async def h_status(event):
+            s = db.get_stats()
+            await event.reply(f"📊 **STATUS ANTREAN**\n⏳ Menunggu: `{s['pending']}`\n👷 Aktif: `{s['active']}`")
 
-async def run_admin():
-    client = TelegramClient('session_admin', API_ID, API_HASH)
-    await client.start(bot_token=BOT_TOKEN)
-    setup_admin_handlers(client)
-    logger.info("BOT MODE: ADMIN started.")
-    await client.run_until_disconnected()
+        @client.on(events.CallbackQuery())
+        async def h_cb(event):
+            if event.data.startswith(b"dl_"):
+                bid = event.data.decode().split("_")[1]
+                if db.add_task(bid, f"ID {bid}", event.chat_id, priority=1):
+                    await event.answer("📥 Berhasil ditambahkan!")
+                else: await event.answer("⚠️ Sudah ada di antrean.")
 
+        await client.run_until_disconnected()
+    
+    loop.run_until_complete(_main())
+
+# --- MAIN ENTRY POINT ---
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=['auto', 'admin'], help='Pilih mode bot')
-    args = parser.parse_args()
-
-    if args.mode == 'auto':
-        asyncio.run(run_auto())
-    elif args.mode == 'admin':
-        asyncio.run(run_admin())
-    else:
-        print("Gunakan: python main.py --mode auto  ATAU  python main.py --mode admin")
+    # Start both processes from single python main.py command
+    p1 = multiprocessing.Process(target=run_auto_process, name="AutoProcess")
+    p2 = multiprocessing.Process(target=run_admin_process, name="AdminProcess")
+    
+    p1.start()
+    p2.start()
+    
+    logger.info("🚀 Dual-process system started (Auto + Admin).")
+    
+    try:
+        p1.join()
+        p2.join()
+    except KeyboardInterrupt:
+        logger.info("Stopping bot...")
+        p1.terminate()
+        p2.terminate()
