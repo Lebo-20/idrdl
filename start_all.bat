@@ -1,19 +1,16 @@
 @echo off
-title iDrama Bot Launcher
-echo [1/3] Migrating historical data if needed...
-python migrate_history.py
+title iDrama Bot Launcher (Single Main.py)
+echo [1/2] Starting Engine Process (Auto Scan & Worker)...
+start "iDrama Engine" cmd /k "python main.py --mode auto"
 
-echo [2/3] Starting Engine Process (Auto Scan & Worker)...
-start "iDrama Engine" cmd /k "python engine.py"
+timeout /t 5 /nobreak > nul
 
-timeout /t 2 /nobreak > nul
-
-echo [3/3] Starting Admin Process (Commands & Panel)...
-start "iDrama Admin" cmd /k "python admin.py"
+echo [2/2] Starting Admin Process (Commands & Panel)...
+start "iDrama Admin" cmd /k "python main.py --mode admin"
 
 echo.
-echo All processes started! 
-echo Engine: Automated scanning and downloading (No commands).
-echo Admin: Command processing (/download, /cari, /panel).
+echo All processes started from main.py!
+echo Engine: Automated scanning and downloading.
+echo Admin: Command processing (/download, /cari, /status).
 echo.
 pause

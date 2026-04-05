@@ -3,12 +3,22 @@ import asyncio
 import logging
 import shutil
 import tempfile
-import random
+import re
 import json
+import argparse
+import sqlite3
 from telethon import TelegramClient, events, Button
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Configuration
+API_ID = int(os.environ.get("API_ID", "0"))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+AUTO_CHANNEL = int(os.environ.get("AUTO_CHANNEL", ADMIN_ID))
+DB_PATH = "bot_data.db"
 
 # Local imports
 from api import (
@@ -18,408 +28,213 @@ from downloader import download_all_episodes
 from merge import merge_episodes
 from uploader import upload_drama
 
-# Configuration
-API_ID = int(os.environ.get("API_ID", "0"))
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
-AUTO_CHANNEL = int(os.environ.get("AUTO_CHANNEL", ADMIN_ID))
-PROCESSED_FILE = "processed.json"
-
-# Initialize state
-def load_processed():
-    if os.path.exists(PROCESSED_FILE):
-        try:
-            with open(PROCESSED_FILE, "r") as f:
-                return set(json.load(f))
-        except: pass
-    return set()
-
-def save_processed(data):
-    with open(PROCESSED_FILE, "w") as f:
-        json.dump(list(data), f)
-
-processed_ids = load_processed()
-
 # Initialize logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s')
+logger = logging.getLogger("MAIN")
 
-# Initialize Bot State
-class BotState:
-    is_auto_running = True
-    is_processing = False
-    download_queue = asyncio.PriorityQueue()
-    queued_ids = set() # To track items currently in the queue
-    current_task_info = "Idle"
+# --- DATABASE LAYER (Integrated inside main.py) ---
+class Database:
+    def __init__(self, db_path=DB_PATH):
+        self.db_path = db_path
+        self._init_db()
 
-# Initialize client
-client = TelegramClient('dramabox_bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+    def _init_db(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS processed (book_id TEXT PRIMARY KEY)")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_id TEXT UNIQUE,
+                    title TEXT,
+                    chat_id INTEGER,
+                    priority INTEGER,
+                    status INTEGER DEFAULT 0,
+                    error_msg TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
 
-def get_panel_buttons():
-    status_text = "🟢 RUNNING" if BotState.is_auto_running else "🔴 STOPPED"
-    queue_size = BotState.download_queue.qsize()
-    return [
-        [Button.inline("▶️ Start Auto", b"start_auto"), Button.inline("⏹ Stop Auto", b"stop_auto")],
-        [Button.inline(f"📊 Status: {status_text}", b"status")],
-        [Button.inline(f"⏳ Antrean: {queue_size} drama", b"status")]
-    ]
+    def is_processed(self, book_id):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT 1 FROM processed WHERE book_id = ?", (str(book_id),))
+            return cursor.fetchone() is not None
 
-@client.on(events.NewMessage(pattern=r'/update'))
-async def update_bot(event):
-    if event.sender_id != ADMIN_ID:
-        await event.reply("❌ Perintah ini hanya untuk Admin utama.")
-        return
-    import subprocess
-    import sys
-    import os
-    
-    status_msg = await event.reply("🔄 Menarik pembaruan dari GitHub...")
-    try:
-        # Run git pull
-        result = subprocess.run(["git", "pull", "origin", "main"], capture_output=True, text=True)
-        if "Already up to date" in result.stdout and "--force" not in event.text:
-             await status_msg.edit(f"✅ Sudah yang terbaru:\n```\n{result.stdout}\n```")
-             return
+    def add_processed(self, book_id):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT OR IGNORE INTO processed (book_id) VALUES (?)", (str(book_id),))
+            conn.commit()
 
-        await status_msg.edit(f"✅ Repositori berhasil di-pull:\n```\n{result.stdout}\n```\n\nSedang memulai ulang sistem...")
-        
-        # Disconnect client properly before restart
-        await client.disconnect()
-
-        # Robust restart for Windows/Linux
-        if os.name == 'nt':
-            # On Windows, using DETACHED_PROCESS ensures the new bot survives when the old one exits
-            import subprocess
-            DETACHED_PROCESS = 0x00000008
-            # Re-run the bot using the full executable path and current script
-            script_path = os.path.abspath(sys.argv[0])
-            subprocess.Popen([sys.executable, script_path], creationflags=DETACHED_PROCESS, shell=True)
-            sys.exit()
-        else:
-            # Unix-like uses execv to replace the current process
-            os.execv(sys.executable, [sys.executable] + sys.argv)
-            
-    except Exception as e:
-        logger.error(f"Update error: {e}")
-        try: await status_msg.edit(f"❌ Gagal melakukan update: {e}")
-        except: pass
-
-@client.on(events.NewMessage(pattern='/panel'))
-async def panel(event):
-    if event.chat_id != ADMIN_ID:
-        return
-    await event.reply("🎛 **iDrama Bot Control Panel**", buttons=get_panel_buttons())
-
-@client.on(events.CallbackQuery())
-async def panel_callback(event):
-    if event.sender_id != ADMIN_ID:
-        return
-        
-    data = event.data
-    
-    try:
-        if data == b"start_auto":
-            BotState.is_auto_running = True
-            await event.answer("Auto-mode started!")
-            await event.edit("🎛 **iDrama Bot Control Panel**", buttons=get_panel_buttons())
-        elif data == b"stop_auto":
-            BotState.is_auto_running = False
-            await event.answer("Auto-mode stopped!")
-            await event.edit("🎛 **iDrama Bot Control Panel**", buttons=get_panel_buttons())
-        elif data == b"status":
-            await event.answer(f"Status: {'Running' if BotState.is_auto_running else 'Stopped'}")
-            await event.edit("🎛 **iDrama Bot Control Panel**", buttons=get_panel_buttons())
-        elif data.startswith(b"dl_"):
-            book_id = data.decode().split("_")[1]
-            await event.answer("Starting download...")
-            # Trigger download logic (similar to /download command but as a task)
-            asyncio.create_task(handle_one_download(event.chat_id, book_id))
-    except Exception as e:
-        if "message is not modified" in str(e).lower(): pass
-        else: logger.error(f"Callback error: {e}")
-@client.on(events.NewMessage(pattern='/checkq'))
-async def check_queue(event):
-    if event.sender_id != ADMIN_ID: return
-    queue_size = BotState.download_queue.qsize()
-    status = f"👷 **Worker Status:** {'PROCESSING' if BotState.is_processing else 'IDLE'}\n"
-    status += f"📝 **Current Task:** `{BotState.current_task_info}`\n"
-    status += f"⏳ **Queue Size:** {queue_size} drama\n"
-    if BotState.queued_ids:
-        status += f"🆔 **Queued IDs:** `{list(BotState.queued_ids)[:5]}...`"
-    await event.reply(status)
-
-async def download_worker():
-    """Background worker that processes the download queue one by one."""
-    global processed_ids
-    logger.info("👷 Download worker started.")
-    while True:
-        item = {} # Initialize to prevent errors in finally block
+    def add_task(self, book_id, title, chat_id, priority=2):
         try:
-            # item is a tuple: (priority, data_dict)
-            priority, item_tuple = await BotState.download_queue.get()
-            priority, item = item_tuple if isinstance(item_tuple, tuple) else (priority, item_tuple)
-            
-            chat_id = item['chat_id']
-            book_id = item['book_id']
-            title = item.get('title', f'ID {book_id}')
-            status_msg = item.get('status_msg')
-            
-            BotState.is_processing = True
-            BotState.current_task_info = f"Processing {title} (P{priority})"
-            
-            logger.info(f"⚡ [Queue] Processing task: {title} ({book_id}) - Priority {priority}")
-            
-            # If no status_msg was provided (auto-mode), create a start message
-            if not status_msg:
-                try:
-                    status_msg = await client.send_message(
-                        chat_id, 
-                        f"🎬 **Mulai Memproses (Antrean)**\n🎬 `{title}`\n🆔 `{book_id}`\n⏳ Mohon tunggu..."
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to send start message for auto mode: {e}")
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("INSERT INTO tasks (book_id, title, chat_id, priority, status) VALUES (?, ?, ?, ?, 0)", 
+                            (str(book_id), title, chat_id, priority))
+                conn.commit()
+                return True
+        except sqlite3.IntegrityError: return False
 
-            logger.info(f"🚀 Calling process_drama_full for: {title}")
-            try:
-                # Set a very long timeout (10 hours) as requested
-                success = await asyncio.wait_for(process_drama_full(book_id, chat_id, status_msg), timeout=36000)
-            except asyncio.TimeoutError:
-                logger.error(f"⌛ Task {title} timed out after 10 hours.")
-                success = False
-            except Exception as e:
-                logger.error(f"Error in process_drama: {e}")
-                success = False
-            
-            if success:
-                processed_ids.add(book_id)
-                save_processed(processed_ids)
-                logger.info(f"✅ Success processing {title}")
-                try: await client.send_message(chat_id, f"✅ **Selesai:** {title}")
-                except: pass
-            else:
-                logger.error(f"❌ Failed processing {title}")
-                # We don't add to processed_ids if it failed, so it can be re-scanned/re-queued
-                try: await client.send_message(chat_id, f"❌ **Gagal:** {title}")
-                except: pass
-                
-            # Delete status message if it survived
-            if status_msg:
-                try: await status_msg.delete()
-                except: pass
+    def get_next_task(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT id, book_id, title, chat_id, priority FROM tasks WHERE status = 0 ORDER BY priority ASC, created_at ASC LIMIT 1")
+            return cursor.fetchone()
 
-        except Exception as e:
-            logger.error(f"Worker Error: {e}")
-        finally:
-            # Remove from queued tracking regardless of success/fail
-            if 'book_id' in item:
-                BotState.queued_ids.discard(item['book_id'])
-            
-            BotState.is_processing = False
-            BotState.current_task_info = "Idle"
-            BotState.download_queue.task_done()
-            await asyncio.sleep(2) # Brief rest between tasks
+    def update_task_status(self, task_id, status, error_msg=None):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE tasks SET status = ?, error_msg = ? WHERE id = ?", (status, error_msg, task_id))
+            conn.commit()
 
-async def handle_one_download(chat_id, book_id, title=None):
-    """Adds a drama to the download queue."""
-    # Check if already processed
-    if book_id in processed_ids:
-        await client.send_message(chat_id, f"✅ Drama `{book_id}` sudah pernah diproses sebelumnya.")
-        return
+    def delete_task(self, task_id):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+            conn.commit()
 
-    # Check if currently in queue
-    if book_id in BotState.queued_ids:
-        await client.send_message(chat_id, f"🕒 Drama `{book_id}` sedang dalam antrean. Mohon bersabar.")
-        return
-    
-    # Mark as queued
-    BotState.queued_ids.add(book_id)
-    
-    queue_size = BotState.download_queue.qsize()
-    status_text = "Sedang diproses..." if BotState.is_processing and queue_size == 0 else f"Masuk antrean ke-{queue_size + 1}"
-    
-    msg = await client.send_message(chat_id, f"📥 **Pesan Diterima**\n🆔 `{book_id}`\n📊 Status: {status_text} (Prioritas Manual)")
-    
-    # Put in queue with Priority 1 (Manual)
-    await BotState.download_queue.put((1, {
-        'chat_id': chat_id,
-        'book_id': book_id,
-        'title': title or f"ID {book_id}",
-        'status_msg': msg
-    }))
+    def reset_processing_tasks(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE tasks SET status = 0 WHERE status = 1")
+            conn.commit()
 
-@client.on(events.NewMessage(pattern='/start'))
-async def start(event):
-    await event.reply("Welcome to iDrama Downloader Bot! 🎉\n\nGunakan perintah:\n🔍 `/cari {judul}` - Mencari drama\n📽 `/download {bookId}` - Download ID drama tertentu.")
+    def get_stats(self):
+        with sqlite3.connect(self.db_path) as conn:
+            pending = conn.execute("SELECT COUNT(*) FROM tasks WHERE status = 0").fetchone()[0]
+            active = conn.execute("SELECT title FROM tasks WHERE status = 1 LIMIT 1").fetchone()
+            return {"pending": pending, "active": active[0] if active else "Idle"}
 
-@client.on(events.NewMessage(pattern=r'/cari (.*)'))
-async def on_search(event):
-    query = event.pattern_match.group(1).strip()
-    if not query:
-        await event.reply("❌ Masukkan judul drama. Contoh: `/cari istri ceo`")
-        return
-        
-    status = await event.reply(f"🔍 Mencari drama: **{query}**...")
-    results = await search_dramas(query)
-    
-    if not results:
-        await status.edit(f"❌ Tidak ditemukan hasil untuk `{query}`.")
-        return
-        
-    buttons = []
-    # Limit to 10 results for clarity
-    for item in results[:10]:
-        title = item.get("bookName") or item.get("title") or "Unknown"
-        bid = item.get("bookId") or item.get("id")
-        if bid:
-            buttons.append([Button.inline(f"🎬 {title[:40]}", f"dl_{bid}")])
-            
-    await status.edit(f"✅ Ditemukan {len(buttons)} hasil untuk **{query}**:", buttons=buttons)
+db = Database()
 
-@client.on(events.NewMessage(pattern=r'/download\s+(\w+)'))
-async def on_download(event):
-    chat_id = event.chat_id
-    if chat_id != ADMIN_ID:
-        await event.reply("❌ Maaf, perintah ini hanya untuk admin.")
-        return
-        
-    # Manual download (Queue enabled, Priority 1)
-        
-    book_id = event.pattern_match.group(1).strip()
-    logger.info(f"Manual download triggered for ID: {book_id}")
-    await handle_one_download(chat_id, book_id)
-
-async def process_drama_full(book_id, chat_id, status_msg=None):
-    """Refactored logic for iDrama API."""
+# --- ENGINE LOGIC (AUTO MODE) ---
+async def process_drama_full(client, book_id, chat_id, status_msg=None):
     data_full = await get_drama_detail(book_id)
     if not data_full:
         if status_msg: await status_msg.edit(f"❌ Detail drama `{book_id}` tidak ditemukan.")
         return False
-        
+    
     book_data = data_full.get("book", {})
-    episodes = await get_all_episodes(book_id)
-    if not episodes:
-        episodes = data_full.get("list", [])
-        
-    if not episodes:
-        if status_msg: await status_msg.edit(f"❌ Episode drama `{book_id}` tidak ditemukan.")
-        return False
+    episodes = await get_all_episodes(book_id) or data_full.get("list", [])
+    if not episodes: return False
 
     title_raw = book_data.get("bookName") or f"Drama_{book_id}"
-    # Sanitize title for filename
-    import re
     title = re.sub(r'[\\/*?:"<>|]', "", title_raw)
-    
-    description = book_data.get("introduction") or "No description."
-    poster = book_data.get("cover") or ""
-    
     temp_dir = tempfile.mkdtemp(prefix=f"idrama_{book_id}_")
     video_dir = os.path.join(temp_dir, "episodes")
     os.makedirs(video_dir, exist_ok=True)
     
     try:
-        if status_msg: await status_msg.edit(f"🎬 Processing **{title}** (iDrama)...")
+        if status_msg: await status_msg.edit(f"🎬 Processing **{title}**...")
+        if not await download_all_episodes(episodes, video_dir): return False
         
-        # Download
-        success = await download_all_episodes(episodes, video_dir)
-        if not success:
-            if status_msg: await status_msg.edit("❌ Download Gagal.")
-            return False
-
-        # Merge
-        # Ensure title used here is the sanitized version
         output_video_path = os.path.join(temp_dir, f"{title}.mp4")
-        merge_success = merge_episodes(video_dir, output_video_path)
-        if not merge_success:
-            if status_msg: await status_msg.edit("❌ Merge Gagal.")
-            return False
-
-        # Upload
-        upload_success = await upload_drama(
-            client, chat_id, 
-            title, description, 
-            poster, output_video_path,
-            book_id=book_id
-        )
+        if not merge_episodes(video_dir, output_video_path): return False
         
-        if upload_success:
-            return True
-        else:
-            if status_msg: await status_msg.edit("❌ Upload Gagal.")
-            return False
-            
-    except Exception as e:
-        logger.error(f"Error processing {book_id}: {e}")
-        try:
-            if status_msg: await status_msg.edit(f"❌ Error: {e}")
-        except: pass
-        return False
+        return await upload_drama(client, chat_id, title, book_data.get("introduction", ""), book_data.get("cover", ""), output_video_path, book_id=book_id)
     finally:
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
-async def auto_mode_loop():
-    """Logic to periodically check for Hot and Home dramas."""
-    global processed_ids
-    
-    is_initial_run = True
-    
+async def download_worker(client):
+    logger.info("👷 Worker started.")
+    db.reset_processing_tasks()
     while True:
-        if not BotState.is_auto_running:
+        task = db.get_next_task()
+        if not task:
             await asyncio.sleep(5)
             continue
-            
+        
+        tid, bid, title, cid, prio = task
+        db.update_task_status(tid, 1)
+        status_msg = await client.send_message(cid, f"🎬 **Mulai Memproses**\n🎬 `{title}`\n🆔 `{bid}`")
+        
         try:
-            interval = 5 if is_initial_run else 30 
-            logger.info(f"🔍 [iDrama] Scanning for new dramas...")
-            
-            hot_dramas = await get_hot_dramas() or []
-            popular_dramas = await get_home_dramas() or []
-            
-            all_new = []
-            seen_in_scan = set()
-            
-            for d in hot_dramas + popular_dramas:
-                bid = str(d.get("bookId") or d.get("id") or d.get("action", ""))
-                if bid and bid not in processed_ids and bid not in seen_in_scan:
-                    all_new.append(d)
-                    seen_in_scan.add(bid)
-            
-            if not all_new:
-                logger.info("😴 No new dramas found.")
-                is_initial_run = False
-                await asyncio.sleep(interval * 60)
-                continue
-
-            for drama in all_new:
-                if not BotState.is_auto_running: break
-                
-                bid = str(drama.get("bookId") or drama.get("id") or drama.get("action", ""))
-                title = drama.get("bookName") or drama.get("tags") or drama.get("title") or "Unknown"
-                
-                logger.info(f"✨ New discovery added to queue: {title} ({bid})")
-                
-                # Push to queue instead of processing directly
-                BotState.queued_ids.add(bid) # Prevent scanning it back while in queue
-                
-                # Priority 2 for Auto-Scan
-                await BotState.download_queue.put((2, {
-                    'chat_id': AUTO_CHANNEL,
-                    'book_id': bid,
-                    'title': title,
-                    'status_msg': None
-                }))
-                
-                await asyncio.sleep(2)
-            
-            is_initial_run = False
-            await asyncio.sleep(interval * 60)
-            
+            if await asyncio.wait_for(process_drama_full(client, bid, cid, status_msg), timeout=36000):
+                db.add_processed(bid)
+                db.delete_task(tid)
+                await client.send_message(cid, f"✅ **Selesai:** {title}")
+            else:
+                db.update_task_status(tid, 3, "Failed")
+                await client.send_message(cid, f"❌ **Gagal:** {title}")
         except Exception as e:
-            logger.error(f"⚠️ Loop error: {e}")
+            db.update_task_status(tid, 3, str(e))
+        finally:
+            try: await status_msg.delete()
+            except: pass
+        await asyncio.sleep(2)
+
+async def auto_mode_loop():
+    logger.info("🔍 Auto-detector started.")
+    initial = True
+    while True:
+        try:
+            hot = await get_hot_dramas() or []
+            home = await get_home_dramas() or []
+            for d in (hot + home):
+                bid = str(d.get("bookId") or d.get("id") or d.get("action", ""))
+                if bid and not db.is_processed(bid):
+                    title = d.get("bookName") or d.get("title") or f"ID {bid}"
+                    if db.add_task(bid, title, AUTO_CHANNEL, priority=2):
+                        logger.info(f"✨ New: {title}")
+            initial = False
+            await asyncio.sleep(30 * 60)
+        except Exception as e:
+            logger.error(f"Loop Error: {e}")
             await asyncio.sleep(60)
 
+# --- ADMIN LOGIC (ADMIN MODE) ---
+def setup_admin_handlers(client):
+    @client.on(events.NewMessage(pattern='/start'))
+    async def h_start(event):
+        await event.reply("🔍 `/cari {judul}`\n📽 `/download {id}`\n📊 `/status`")
+
+    @client.on(events.NewMessage(pattern=r'/cari (.*)'))
+    async def h_search(event):
+        query = event.pattern_match.group(1).strip()
+        res = await search_dramas(query)
+        if not res: return await event.reply("❌ Kosong.")
+        btns = [[Button.inline(f"🎬 {r.get('bookName')[:40]}", f"dl_{r.get('bookId')}")] for r in res[:10]]
+        await event.reply(f"✅ Hasil search `{query}`:", buttons=btns)
+
+    @client.on(events.NewMessage(pattern=r'/download\s+(\w+)'))
+    async def h_dl(event):
+        if event.sender_id != ADMIN_ID: return
+        bid = event.pattern_match.group(1).strip()
+        if db.is_processed(bid): return await event.reply("✅ Sudah.")
+        if db.add_task(bid, f"Manual ID {bid}", event.chat_id, priority=1):
+            await event.reply(f"📥 Masuk antrean manual.")
+        else: await event.reply("🕒 Sudah di antrean.")
+
+    @client.on(events.NewMessage(pattern='/status'))
+    async def h_status(event):
+        s = db.get_stats()
+        await event.reply(f"⏳ Pending: {s['pending']}\n👷 Active: {s['active']}")
+
+    @client.on(events.CallbackQuery())
+    async def h_cb(event):
+        if event.data.startswith(b"dl_"):
+            bid = event.data.decode().split("_")[1]
+            if db.add_task(bid, f"ID {bid}", event.chat_id, priority=1):
+                await event.answer("📥 Ditambahkan!")
+            else: await event.answer("⚠️ Sudah ada.")
+
+# --- BOOTSTRAP ---
+async def run_auto():
+    client = TelegramClient('session_auto', API_ID, API_HASH)
+    await client.start(bot_token=BOT_TOKEN)
+    logger.info("BOT MODE: AUTO started.")
+    await asyncio.gather(download_worker(client), auto_mode_loop())
+
+async def run_admin():
+    client = TelegramClient('session_admin', API_ID, API_HASH)
+    await client.start(bot_token=BOT_TOKEN)
+    setup_admin_handlers(client)
+    logger.info("BOT MODE: ADMIN started.")
+    await client.run_until_disconnected()
+
 if __name__ == '__main__':
-    logger.info("iDrama Bot Active.")
-    client.loop.create_task(auto_mode_loop())
-    client.loop.create_task(download_worker())
-    client.run_until_disconnected()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--mode', choices=['auto', 'admin'], help='Pilih mode bot')
+    args = parser.parse_args()
+
+    if args.mode == 'auto':
+        asyncio.run(run_auto())
+    elif args.mode == 'admin':
+        asyncio.run(run_admin())
+    else:
+        print("Gunakan: python main.py --mode auto  ATAU  python main.py --mode admin")
