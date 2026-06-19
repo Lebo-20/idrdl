@@ -3,7 +3,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://idrama.dramabos.my.id"
+BASE_URL = "https://idrama.dramabos.online"
 AUTH_CODE = "A8D6AB170F7B89F2182561D3B32F390D"
 
 async def get_drama_detail(book_id: str):
@@ -145,7 +145,7 @@ async def get_play_url(book_id: str, ep: int):
         "code": AUTH_CODE
     }
     headers = {
-        "Referer": "https://idrama.dramabos.my.id/",
+        "Referer": "https://idrama.dramabos.online/",
         "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1"
     }
     async with httpx.AsyncClient(timeout=30) as client:

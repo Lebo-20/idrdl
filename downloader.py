@@ -13,12 +13,12 @@ async def download_m3u8(url: str, output_path: str, subtitle_url: str = None, re
     If subtitle_url is provided, it performs hardsubbing with specified styles.
     """
     headers_str = (
-        "Referer: https://idrama.dramabos.my.id/\r\n"
+        "Referer: https://idrama.dramabos.online/\r\n"
     )
     user_agent = "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1"
 
     # Strip iDrama proxy if present, we'll use our own headers
-    if url.startswith("https://idrama.dramabos.my.id/proxy?url="):
+    if url.startswith("https://idrama.dramabos.online/proxy?url="):
         from urllib.parse import unquote, urlparse, parse_qs
         parsed = urlparse(url)
         url = parse_qs(parsed.query).get('url', [url])[0]
